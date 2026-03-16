@@ -41,7 +41,7 @@ def _badge(action: str) -> str:
     elif a == "SELL SHORT":
         color = "#dc2626"
     else:
-        color = "#6b7280"  # gray
+        color = "#6b7280"
     return (
         f"<span style='background:{color};color:white;padding:0.2rem 0.65rem;"
         "border-radius:999px;font-weight:700;font-size:0.85rem;'>"
@@ -83,6 +83,22 @@ def _friendly_name(ticker: str) -> str:
     return ticker
 
 
+def _flatten_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten multi-level columns that yfinance sometimes returns."""
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
+def _scalar(val) -> float:
+    """Safely convert a pandas scalar/Series/array to a Python float."""
+    if hasattr(val, "item"):
+        return float(val.item())
+    if hasattr(val, "iloc"):
+        return float(val.iloc[0])
+    return float(val)
+
+
 def _load_intraday_15m(ticker: str) -> pd.DataFrame:
     df = yf.download(
         ticker,
@@ -94,7 +110,7 @@ def _load_intraday_15m(ticker: str) -> pd.DataFrame:
     )
     if df is None or df.empty:
         raise ValueError(f"No intraday data available for {ticker}.")
-    df = df.copy()
+    df = _flatten_df(df.copy())
     df.index = pd.to_datetime(df.index)
     return df
 
@@ -113,15 +129,16 @@ def render_chart_for_opportunity(o: dict) -> None:
         st.warning(f"Could not load intraday chart for {label}: {e}")
         return
 
-    # Guard for empty / invalid intraday data (e.g. outside market hours)
-    if df is None or df.empty or df["High"].dropna().empty:
+    high_vals = df["High"].dropna()
+    if df.empty or high_vals.empty:
         st.warning(
             f"No intraday chart data available for {label} right now. "
             "Try again during market hours (2:30pm–9pm UK time)."
         )
         return
 
-    df = df.tail(120)  # show roughly the recent part of today
+    df = df.tail(120)
+    high_vals = df["High"].dropna()
 
     ema9 = _add_ema(df, 9)
     ema21 = _add_ema(df, 21)
@@ -191,71 +208,27 @@ def render_chart_for_opportunity(o: dict) -> None:
     rr = float(o["risk_reward"])
     size = int(o["position_size"])
 
-    # Horizontal lines
-    fig.add_shape(
-        type="line",
-        x0=x0,
-        x1=x1,
-        y0=entry,
-        y1=entry,
-        xref="x",
-        yref="y1",
-        line=dict(color="#22c55e", width=1.5, dash="dash"),
-    )
-    fig.add_annotation(
-        x=x1,
-        y=entry,
-        xref="x",
-        yref="y1",
-        text=f"Entry ${entry:.2f}",
-        showarrow=False,
-        font=dict(color="#bbf7d0", size=11),
-        xanchor="right",
-    )
+    # Safely get high/low scalars
+    high_max = _scalar(high_vals.max())
+    low_min = _scalar(df["Low"].dropna().min())
 
-    fig.add_shape(
-        type="line",
-        x0=x0,
-        x1=x1,
-        y0=target,
-        y1=target,
-        xref="x",
-        yref="y1",
-        line=dict(color="#3b82f6", width=1.5, dash="dash"),
-    )
-    fig.add_annotation(
-        x=x1,
-        y=target,
-        xref="x",
-        yref="y1",
-        text=f"Target ${target:.2f}",
-        showarrow=False,
-        font=dict(color="#bfdbfe", size=11),
-        xanchor="right",
-    )
+    for y_val, label_text, color, font_color in [
+        (entry, f"Entry ${entry:.2f}", "#22c55e", "#bbf7d0"),
+        (target, f"Target ${target:.2f}", "#3b82f6", "#bfdbfe"),
+        (stop, f"Stop ${stop:.2f}", "#f97373", "#fecaca"),
+    ]:
+        fig.add_shape(
+            type="line", x0=x0, x1=x1, y0=y_val, y1=y_val,
+            xref="x", yref="y1",
+            line=dict(color=color, width=1.5, dash="dash"),
+        )
+        fig.add_annotation(
+            x=x1, y=y_val, xref="x", yref="y1",
+            text=label_text, showarrow=False,
+            font=dict(color=font_color, size=11),
+            xanchor="right",
+        )
 
-    fig.add_shape(
-        type="line",
-        x0=x0,
-        x1=x1,
-        y0=stop,
-        y1=stop,
-        xref="x",
-        yref="y1",
-        line=dict(color="#f97373", width=1.5, dash="dash"),
-    )
-    fig.add_annotation(
-        x=x1,
-        y=stop,
-        xref="x",
-        yref="y1",
-        text=f"Stop ${stop:.2f}",
-        showarrow=False,
-        font=dict(color="#fecaca", size=11),
-        xanchor="right",
-    )
-
-    # Profit/risk shaded zones
     if target > entry:
         profit_y0, profit_y1 = entry, target
         risk_y0, risk_y1 = stop, entry
@@ -264,31 +237,16 @@ def render_chart_for_opportunity(o: dict) -> None:
         risk_y0, risk_y1 = entry, stop
 
     fig.add_shape(
-        type="rect",
-        x0=x0,
-        x1=x1,
-        y0=profit_y0,
-        y1=profit_y1,
-        xref="x",
-        yref="y1",
-        fillcolor="rgba(34,197,94,0.15)",
-        line=dict(width=0),
-        layer="below",
+        type="rect", x0=x0, x1=x1, y0=profit_y0, y1=profit_y1,
+        xref="x", yref="y1",
+        fillcolor="rgba(34,197,94,0.15)", line=dict(width=0), layer="below",
     )
     fig.add_shape(
-        type="rect",
-        x0=x0,
-        x1=x1,
-        y0=risk_y0,
-        y1=risk_y1,
-        xref="x",
-        yref="y1",
-        fillcolor="rgba(239,68,68,0.18)",
-        line=dict(width=0),
-        layer="below",
+        type="rect", x0=x0, x1=x1, y0=risk_y0, y1=risk_y1,
+        xref="x", yref="y1",
+        fillcolor="rgba(239,68,68,0.18)", line=dict(width=0), layer="below",
     )
 
-    # Info box annotation
     info_text = (
         f"Entry: ${entry:.2f}<br>"
         f"Target: ${target:.2f}<br>"
@@ -296,28 +254,17 @@ def render_chart_for_opportunity(o: dict) -> None:
         f"R/R: {rr:.1f}:1<br>"
         f"Size: {size} shares"
     )
+    annotation_y = max(high_max, target, entry, stop)
     fig.add_annotation(
-        x=x0,
-        y=max(
-            float(df["High"].max()),
-            float(target),
-            float(entry),
-            float(stop),
-        ),
-        xref="x",
-        yref="y1",
-        text=info_text,
-        showarrow=False,
-        align="left",
-        bgcolor="rgba(17,24,39,0.85)",
-        bordercolor="#4b5563",
-        borderwidth=1,
-        font=dict(color="white", size=11),
+        x=x0, y=annotation_y,
+        xref="x", yref="y1",
+        text=info_text, showarrow=False, align="left",
+        bgcolor="rgba(17,24,39,0.85)", bordercolor="#4b5563",
+        borderwidth=1, font=dict(color="white", size=11),
     )
 
     fig.update_layout(
-        template="plotly_dark",
-        height=500,
+        template="plotly_dark", height=500,
         margin=dict(l=40, r=40, t=40, b=40),
         showlegend=False,
     )
@@ -362,7 +309,7 @@ if scan:
 
             header_cols = st.columns([2, 1])
             with header_cols[0]:
-                st.subheader("Today’s opportunities")
+                st.subheader("Today's opportunities")
                 if universe_note:
                     st.caption(universe_note)
             with header_cols[1]:
@@ -370,9 +317,8 @@ if scan:
                 st.write(last_updated or "—")
 
             if not opps:
-                st.info("No opportunities found that meet today’s alignment + risk/reward rules.")
+                st.info("No opportunities found that meet today's alignment + risk/reward rules.")
             else:
-                # --- Summary table
                 st.subheader("Ranked summary")
                 summary_rows = []
                 for o in opps:
@@ -407,7 +353,7 @@ if scan:
                     with st.container(border=True):
                         top_cols = st.columns([2, 2, 2, 2])
                         with top_cols[0]:
-                            st.markdown(f"### {t}")
+                            st.markdown(f"### {_friendly_name(t)}")
                             st.caption(f"Current price: ${o['current_price']:.2f}")
                         with top_cols[1]:
                             st.markdown("**Action**")
@@ -428,7 +374,7 @@ if scan:
                                 unsafe_allow_html=True,
                             )
 
-                        st.caption(f"Best entry window: {o.get('best_entry_window','—')}")
+                        st.caption(f"Best entry window: {o.get('best_entry_window', '—')}")
                         st.write(o.get("explanation", ""))
 
                         with st.expander("View chart (interactive intraday view)"):
@@ -442,4 +388,3 @@ if scan:
                 with st.expander("Recent broad-market headlines"):
                     for h in headlines[:10]:
                         st.write(f"- {h}")
-
