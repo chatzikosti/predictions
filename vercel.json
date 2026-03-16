@@ -1,7 +1,1 @@
-{
-  "functions": {
-    "api/predictions.py": {
-      "runtime": "python3.12"
-    }
-  }
-}
+{"functions":{"api/predictions.py":{"runtime":"@vercel/python@4.3.0"}}}
