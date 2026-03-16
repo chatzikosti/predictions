@@ -6,3 +6,4 @@ requests
 apscheduler
 transformers
 torch
+plotly
