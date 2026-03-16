@@ -113,6 +113,14 @@ def render_chart_for_opportunity(o: dict) -> None:
         st.warning(f"Could not load intraday chart for {label}: {e}")
         return
 
+    # Guard for empty / invalid intraday data (e.g. outside market hours)
+    if df is None or df.empty or df["High"].dropna().empty:
+        st.warning(
+            f"No intraday chart data available for {label} right now. "
+            "Try again during market hours (2:30pm–9pm UK time)."
+        )
+        return
+
     df = df.tail(120)  # show roughly the recent part of today
 
     ema9 = _add_ema(df, 9)
