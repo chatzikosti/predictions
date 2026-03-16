@@ -199,3 +199,130 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def scan_intraday_opportunities(
+    *,
+    capital: float,
+    top_n: int = 10,
+    prefilter_n: int = 60,
+) -> Dict[str, object]:
+    """
+    Morning scan of the S&P 500 for intraday trading opportunities.
+
+    Implementation notes:
+    - We first prefilter using daily candles for speed.
+    - Then we download intraday (15m + 5m) for a smaller set.
+    """
+    import math
+    from datetime import datetime, timezone
+
+    import pandas as pd
+
+    from utils.data_fetch import FetchConfig, fetch_ohlcv, split_by_ticker
+    from utils.fundamental_analysis import ticker_news_sentiment
+    from utils.intraday_assistant import as_dicts, macro_context_headlines, make_trade_plan
+    from utils.sp500 import get_sp500_tickers
+
+    tickers, universe_note = get_sp500_tickers()
+
+    # --- Prefilter (daily): momentum + liquidity proxy
+    daily_cfg = FetchConfig(interval="1d")
+    chunk = 80
+    daily_frames: Dict[str, pd.DataFrame] = {}
+    for i in range(0, len(tickers), chunk):
+        part = tickers[i : i + chunk]
+        try:
+            df = fetch_ohlcv(part, period="6mo", config=daily_cfg)
+            by = split_by_ticker(df) if isinstance(df.columns, pd.MultiIndex) else {part[0]: df}
+            daily_frames.update(by)
+        except Exception:
+            continue
+
+    # Rank by: last 20d return * volume stability (very lightweight)
+    ranks: List[Tuple[str, float]] = []
+    for t, d in daily_frames.items():
+        try:
+            close = d["Close"].astype(float).dropna()
+            vol = d["Volume"].astype(float).dropna()
+            if len(close) < 40 or len(vol) < 40:
+                continue
+            r20 = float(close.iloc[-1] / close.iloc[-21] - 1.0)
+            v_med = float(vol.tail(20).median())
+            # Penalize very illiquid names
+            score = r20 * math.log10(max(v_med, 1.0))
+            ranks.append((t, score))
+        except Exception:
+            continue
+
+    ranks.sort(key=lambda x: x[1], reverse=True)
+    candidates = [t for t, _ in ranks[: max(20, int(prefilter_n))]]
+
+    # --- Intraday download for candidates
+    m15_cfg = FetchConfig(interval="15m")
+    m5_cfg = FetchConfig(interval="5m")
+
+    daily_ctx: Dict[str, pd.DataFrame] = {t: daily_frames[t] for t in candidates if t in daily_frames}
+    m15_frames: Dict[str, pd.DataFrame] = {}
+    m5_frames: Dict[str, pd.DataFrame] = {}
+
+    for i in range(0, len(candidates), 60):
+        part = candidates[i : i + 60]
+        try:
+            m15 = fetch_ohlcv(part, period="5d", config=m15_cfg)
+            by15 = split_by_ticker(m15) if isinstance(m15.columns, pd.MultiIndex) else {part[0]: m15}
+            m15_frames.update(by15)
+        except Exception:
+            pass
+        try:
+            m5 = fetch_ohlcv(part, period="5d", config=m5_cfg)
+            by5 = split_by_ticker(m5) if isinstance(m5.columns, pd.MultiIndex) else {part[0]: m5}
+            m5_frames.update(by5)
+        except Exception:
+            pass
+
+    # --- Fundamental/news sentiment per candidate (best-effort)
+    sentiment: Dict[str, float] = {}
+    try:
+        sentiment = ticker_news_sentiment(candidates[:50], source="yahoo", limit_per_ticker=10)
+    except Exception:
+        sentiment = {}
+
+    opps = []
+    for t in candidates:
+        if t not in daily_ctx or t not in m15_frames or t not in m5_frames:
+            continue
+        try:
+            opps.append(
+                make_trade_plan(
+                    t,
+                    daily=daily_ctx[t],
+                    m15=m15_frames[t],
+                    m5=m5_frames[t],
+                    capital=float(capital),
+                    news_sentiment=float(sentiment.get(t, 0.0)),
+                )
+            )
+        except Exception:
+            continue
+
+    # Rank by: confidence, RR, score (avoid-only will naturally fall)
+    conf_rank = {"High": 3, "Medium": 2, "Low": 1}
+    opps.sort(
+        key=lambda o: (
+            conf_rank.get(o.confidence, 0),
+            o.risk_reward,
+            o.score,
+            -o.risk,
+        ),
+        reverse=True,
+    )
+
+    macro = macro_context_headlines()
+    return {
+        "last_updated_utc": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+        "universe_note": universe_note,
+        "candidates": candidates[: prefilter_n],
+        "opportunities": as_dicts(opps[: max(5, int(top_n))]),
+        "macro": macro,
+    }
