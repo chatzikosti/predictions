@@ -290,7 +290,12 @@ def render_chart_for_opportunity(o: dict) -> None:
     )
     fig.add_annotation(
         x=x0,
-        y=max(df["High"].max(), target, entry, stop),
+        y=max(
+            float(df["High"].max()),
+            float(target),
+            float(entry),
+            float(stop),
+        ),
         xref="x",
         yref="y1",
         text=info_text,
