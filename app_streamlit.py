@@ -436,7 +436,7 @@ with top:
     with c1:
         capital = st.number_input(
             "Total capital ($)",
-            min_value=100.0,
+            min_value=10.0,
             value=10000.0,
             step=100.0,
             help="Position size is calculated as risking 1% of this amount per trade.",
