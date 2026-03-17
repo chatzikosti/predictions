@@ -543,3 +543,296 @@ if scan:
                 with st.expander("Recent broad-market headlines"):
                     for h in headlines[:10]:
                         st.write(f"- {h}")
+
+# === Market Overview: Sector heatmap ===
+st.divider()
+with st.expander("Market Overview — sector heatmap"):
+    sector_etfs = {
+        "XLY": "Cons. Discretionary",
+        "XLP": "Cons. Staples",
+        "XLE": "Energy",
+        "XLF": "Financials",
+        "XLV": "Health Care",
+        "XLI": "Industrials",
+        "XLK": "Technology",
+        "XLU": "Utilities",
+        "XLRE": "Real Estate",
+        "XLB": "Materials",
+        "XLC": "Communication",
+    }
+    try:
+        data = yf.download(
+            list(sector_etfs.keys()),
+            period="2d",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+        data = _flatten_df(data)
+        close = data["Close"] if isinstance(data.columns, pd.MultiIndex) else data
+        changes = []
+        labels = []
+        for sym, name in sector_etfs.items():
+            try:
+                s = close[sym].dropna()
+                if len(s) < 2:
+                    continue
+                prev, last = float(s.iloc[-2]), float(s.iloc[-1])
+                pct = (last / prev - 1.0) * 100.0
+                changes.append(pct)
+                labels.append(name)
+            except Exception:
+                continue
+        if changes:
+            z = np.array([changes])
+            fig_heat = px.imshow(
+                z,
+                x=labels,
+                y=["Today"],
+                color_continuous_scale=["#7f1d1d", "#f97316", "#16a34a"],
+                aspect="auto",
+            )
+            fig_heat.update_layout(
+                template="plotly_dark",
+                coloraxis_showscale=False,
+                paper_bgcolor="#0a0a0a",
+                plot_bgcolor="#0a0a0a",
+                margin=dict(l=40, r=40, t=40, b=40),
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
+        else:
+            st.info("Sector data is not available right now.")
+    except Exception as e:
+        st.info(f"Unable to load sector heatmap: {e}")
+
+# === Trade Journal & Weekly P&L Summary ===
+st.divider()
+st.subheader("Trade Journal & Weekly Summary")
+
+journal_df = _load_journal()
+if journal_df.empty:
+    st.info("No journal entries yet. Run a scan and record trade outcomes to build your history.")
+else:
+    st.markdown("**Recent journal entries**")
+    show_cols = [
+        "timestamp",
+        "ticker",
+        "action",
+        "entry",
+        "target",
+        "stop",
+        "rr",
+        "position_size",
+        "confidence",
+        "frameworks",
+        "timeframes",
+        "outcome",
+        "pnl_dollars",
+    ]
+    view_df = journal_df.copy()
+    for col in show_cols:
+        if col not in view_df.columns:
+            view_df[col] = np.nan
+    st.dataframe(
+        view_df[show_cols].sort_values("timestamp", ascending=False).head(50),
+        use_container_width=True,
+    )
+
+    st.markdown("**Weekly P&L summary**")
+    today = _now_utc().date()
+    start_week = today - timedelta(days=today.weekday())
+    week_mask = journal_df["timestamp"].dt.date >= start_week
+    week_df = journal_df[week_mask]
+    taken = week_df[week_df["outcome"].isin(["Won", "Lost"])]
+    total_signals = len(week_df)
+    taken_count = len(taken)
+    skipped_count = (week_df["outcome"] == "Skipped").sum()
+    winners = (taken["pnl_dollars"] > 0).sum()
+    losers = (taken["pnl_dollars"] < 0).sum()
+    total_pnl = float(taken["pnl_dollars"].sum()) if taken_count else 0.0
+    win_rate = (winners / taken_count * 100.0) if taken_count else 0.0
+    avg_rr = float(taken["rr"].mean()) if "rr" in taken.columns and taken_count else 0.0
+
+    cols = st.columns(4)
+    cols[0].metric("Total signals (week)", total_signals)
+    cols[1].metric("Taken / Skipped", f"{taken_count} / {skipped_count}")
+    cols[2].metric("Win rate", f"{win_rate:.1f}%")
+    cols[3].metric("Total P&L ($)", f"{total_pnl:+.2f}")
+
+    best_trade = taken.loc[taken["pnl_dollars"].idxmax()] if not taken.empty else None
+    worst_trade = taken.loc[taken["pnl_dollars"].idxmin()] if not taken.empty else None
+
+    if best_trade is not None:
+        st.write(
+            f"**Best trade:** {best_trade['ticker']} "
+            f"({best_trade['pnl_dollars']:+.2f} $)"
+        )
+    if worst_trade is not None:
+        st.write(
+            f"**Worst trade:** {worst_trade['ticker']} "
+            f"({worst_trade['pnl_dollars']:+.2f} $)"
+        )
+
+    # Daily P&L bar chart
+    if not taken.empty:
+        daily_pnl = (
+            taken.assign(day=taken["timestamp"].dt.date)
+            .groupby("day")["pnl_dollars"]
+            .sum()
+            .reset_index()
+        )
+        daily_pnl["color"] = np.where(daily_pnl["pnl_dollars"] >= 0, "#16a34a", "#dc2626")
+        fig_bar = go.Figure(
+            data=[
+                go.Bar(
+                    x=daily_pnl["day"],
+                    y=daily_pnl["pnl_dollars"],
+                    marker_color=daily_pnl["color"],
+                )
+            ]
+        )
+        fig_bar.update_layout(
+            template="plotly_dark",
+            title="Daily P&L (this week)",
+            xaxis_title="Day",
+            yaxis_title="P&L ($)",
+            paper_bgcolor="#0a0a0a",
+            plot_bgcolor="#0a0a0a",
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+        # Equity curve with optional starting balance
+        start_balance = st.number_input(
+            "Starting balance for equity curve ($)",
+            min_value=0.0,
+            value=10000.0,
+            step=100.0,
+        )
+        equity = start_balance + daily_pnl["pnl_dollars"].cumsum()
+        fig_eq = go.Figure(
+            data=[
+                go.Scatter(
+                    x=daily_pnl["day"],
+                    y=equity,
+                    mode="lines+markers",
+                    line=dict(color="#3b82f6", width=2),
+                )
+            ]
+        )
+        fig_eq.update_layout(
+            template="plotly_dark",
+            title="Running account balance (this week)",
+            xaxis_title="Day",
+            yaxis_title="Balance ($)",
+            paper_bgcolor="#0a0a0a",
+            plot_bgcolor="#0a0a0a",
+        )
+        st.plotly_chart(fig_eq, use_container_width=True)
+
+# === Dobby AI analyst chat ===
+st.divider()
+st.subheader("Ask Dobby")
+
+if not st.session_state["dobby_chat"]:
+    st.session_state["dobby_chat"].append(
+        {
+            "role": "assistant",
+            "content": (
+                "Hi Master, I'm Dobby your personal trading analyst. "
+                "Ask me anything about today's opportunities, market conditions, or your positions."
+            ),
+        }
+    )
+
+for msg in st.session_state["dobby_chat"][-5:]:
+    if msg["role"] == "assistant":
+        with st.chat_message("Dobby ⭐"):
+            st.write(msg["content"])
+    else:
+        with st.chat_message("Master"):
+            st.write(msg["content"])
+
+prompt = st.chat_input("Ask Dobby anything about today's trades...")
+
+
+def _dobby_reply(text: str) -> str:
+    now_uk = _now_uk()
+    in_session = _in_market_hours_uk(now_uk)
+    results = None
+    if "results" in globals():
+        results = globals()["results"]
+
+    # Out of hours behaviour
+    if not in_session:
+        return (
+            "Markets are currently closed Master. I can still help you review your journal, "
+            "analyse past trades, or prepare for tomorrow's session."
+        )
+
+    # Simple intent heuristics
+    lower = text.lower()
+    pieces = []
+
+    if "best" in lower and "trade" in lower:
+        if results:
+            opps = results.get("opportunities", []) or []
+            if opps:
+                best = opps[0]
+                pieces.append(
+                    f"Good morning Master, the strongest opportunity right now is {best['ticker']} "
+                    f"with a {best['action']} bias and risk/reward of about {best['risk_reward']:.1f}:1."
+                )
+            else:
+                pieces.append(
+                    "Master, I don't see a clear standout trade at the moment — signals are mixed."
+                )
+        else:
+            pieces.append("Master, I have no fresh scan results yet. Run a scan and I'll review them.")
+    elif "why" in lower and "moving" in lower:
+        ticker = None
+        for t in TICKER_BAR:
+            if t.lower() in lower:
+                ticker = t
+                break
+        if results and ticker:
+            opps = results.get("opportunities", []) or []
+            match = next((o for o in opps if o["ticker"] == ticker), None)
+            if match:
+                fr = ", ".join(match.get("frameworks", [])) or "no major frameworks"
+                pieces.append(
+                    f"Master, {ticker} is moving because multiple signals align — "
+                    f"timeframes {', '.join(match.get('timeframes_confirmed', []))} and frameworks {fr}."
+                )
+            else:
+                pieces.append(
+                    f"Master, {ticker} is active but not one of today's top opportunities in my scan."
+                )
+        else:
+            pieces.append(
+                "Master, I can't tie that move to today's scan yet — data may be stale or missing."
+            )
+    else:
+        if results:
+            opps = results.get("opportunities", []) or []
+            macro = results.get("macro", {}) or {}
+            note = macro.get("note", "")
+            if opps:
+                pieces.append(
+                    f"Master, today's scan found {len(opps)} opportunities. "
+                    f"The strongest ideas lean {opps[0]['action']} with solid multi-timeframe confirmation."
+                )
+            if note:
+                pieces.append(f"Macro context: {note}")
+        else:
+            pieces.append(
+                "Master, I don't have fresh opportunities loaded yet. Run a scan and I'll summarise them for you."
+            )
+
+    return " ".join(pieces)
+
+
+if prompt:
+    st.session_state["dobby_chat"].append({"role": "user", "content": prompt})
+    reply = _dobby_reply(prompt)
+    st.session_state["dobby_chat"].append({"role": "assistant", "content": reply})
