@@ -1,13 +1,98 @@
-import streamlit as st
+import os
+from datetime import datetime, timedelta, timezone
+
+import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import streamlit as st
 import yfinance as yf
 
 from app import scan_intraday_opportunities
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python <3.9 fallback
+    ZoneInfo = None  # type: ignore
+
 
 st.set_page_config(page_title="Intraday Trading Assistant", layout="wide")
+
+JOURNAL_PATH = "trade_journal.csv"
+TICKER_BAR = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "GC=F", "CL=F", "SPY", "QQQ"]
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _now_uk() -> datetime:
+    if ZoneInfo is None:
+        return _now_utc()
+    return _now_utc().astimezone(ZoneInfo("Europe/London"))
+
+
+def _in_market_hours_uk(ts: datetime) -> bool:
+    t = ts.time()
+    # London open 08:00–10:30, NY open 13:30–16:00, NY PM 16:00–20:00 (UK time)
+    return (
+        (t >= ts.replace(hour=8, minute=0, second=0, microsecond=0).time()
+         and t <= ts.replace(hour=10, minute=30, second=0, microsecond=0).time())
+        or (t >= ts.replace(hour=13, minute=30, second=0, microsecond=0).time()
+            and t <= ts.replace(hour=16, minute=0, second=0, microsecond=0).time())
+        or (t >= ts.replace(hour=16, minute=0, second=0, microsecond=0).time()
+            and t <= ts.replace(hour=20, minute=0, second=0, microsecond=0).time())
+    )
+
+
+def _next_session_start_uk(ts: datetime) -> datetime:
+    # Simple approximation: next is today 08:00, 13:30 or 16:00, or next day 08:00
+    sessions = [
+        ts.replace(hour=8, minute=0, second=0, microsecond=0),
+        ts.replace(hour=13, minute=30, second=0, microsecond=0),
+        ts.replace(hour=16, minute=0, second=0, microsecond=0),
+    ]
+    future = [s for s in sessions if s > ts]
+    if future:
+        return future[0]
+    # next day London open
+    return (ts + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+
+
+def _load_journal() -> pd.DataFrame:
+    if os.path.exists(JOURNAL_PATH):
+        try:
+            return pd.read_csv(JOURNAL_PATH, parse_dates=["timestamp"])
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+
+def _save_journal(df: pd.DataFrame) -> None:
+    try:
+        df.to_csv(JOURNAL_PATH, index=False)
+    except Exception:
+        pass
+
+
+def _ensure_session_state():
+    if "scan_results" not in st.session_state:
+        st.session_state["scan_results"] = None
+    if "last_scan_time" not in st.session_state:
+        st.session_state["last_scan_time"] = None
+    if "next_scan_time" not in st.session_state:
+        st.session_state["next_scan_time"] = None
+    if "journal" not in st.session_state:
+        st.session_state["journal"] = _load_journal()
+    if "dobby_chat" not in st.session_state:
+        st.session_state["dobby_chat"] = []
+    if "ticker_cache" not in st.session_state:
+        st.session_state["ticker_cache"] = {"time": None, "data": []}
+
+
+_ensure_session_state()
+
 
 st.title("Intraday Trading Assistant")
 st.caption(
@@ -97,6 +182,72 @@ def _scalar(val) -> float:
     if hasattr(val, "iloc"):
         return float(val.iloc[0])
     return float(val)
+
+
+def _fetch_ticker_bar() -> list[dict]:
+    cache = st.session_state["ticker_cache"]
+    now = _now_utc()
+    if cache["time"] is not None and (now - cache["time"]).total_seconds() < 60:
+        return cache["data"]
+
+    rows: list[dict] = []
+    try:
+        df = yf.download(
+            TICKER_BAR,
+            period="2d",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+        df = _flatten_df(df)
+        if isinstance(df.columns, pd.MultiIndex):
+            # yfinance returns multi-index with first level OHLCV
+            close = df["Close"]
+        else:
+            close = df
+        for t in TICKER_BAR:
+            try:
+                series = close[t].dropna()
+                if len(series) < 2:
+                    price = float(series.iloc[-1])
+                    pct = 0.0
+                else:
+                    prev, last = float(series.iloc[-2]), float(series.iloc[-1])
+                    price = last
+                    pct = (last / prev - 1.0) * 100.0
+                rows.append({"ticker": t, "price": price, "pct": pct})
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    cache["time"] = now
+    cache["data"] = rows
+    return rows
+
+
+def render_ticker_bar() -> None:
+    data = _fetch_ticker_bar()
+    if not data:
+        return
+    with st.container():
+        cols = st.columns(len(data))
+        for col, row in zip(cols, data):
+            color = "#16a34a" if row["pct"] >= 0 else "#dc2626"
+            with col:
+                st.markdown(
+                    f"<div style='background:#000000;padding:0.25rem 0.5rem;"
+                    f"border-radius:999px;text-align:center;border:1px solid #1e293b;'>"
+                    f"<span style='color:#f1f5f9;font-weight:600;margin-right:0.35rem;'>{row['ticker']}</span>"
+                    f"<span style='color:{color};font-weight:600;'>"
+                    f"{row['price']:.2f} ({row['pct']:+.2f}%)"
+                    f"</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+
+render_ticker_bar()
 
 
 def _load_intraday_15m(ticker: str) -> pd.DataFrame:
