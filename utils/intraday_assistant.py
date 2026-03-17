@@ -335,30 +335,119 @@ def make_trade_plan(
 
     i_close = m15["Close"].astype(float).dropna()
     m_close = m5["Close"].astype(float).dropna()
+    if len(i_close) < 20 or len(m_close) < 20:
+        # Not enough intraday history for a precise intraday plan
+        return Opportunity(
+            ticker=ticker,
+            action="AVOID",
+            entry=float("nan"),
+            target=float("nan"),
+            stop=float("nan"),
+            risk_reward=0.0,
+            position_size=0,
+            best_entry_window=str(window_hint),
+            confidence="Low",
+            score=0.0,
+            risk=0.0,
+            signal=0.0,
+            explanation="Avoid for now: not enough intraday data for a tight intraday setup.",
+            current_price=float(m_close.iloc[-1]) if len(m_close) else float("nan"),
+            timeframes_confirmed=list(dict.fromkeys(tfs_confirmed)),
+            frameworks=[],
+        )
+
     last = float(m_close.iloc[-1])
     e9 = float(ema(i_close, 9).iloc[-1])
     e21 = float(ema(i_close, 21).iloc[-1])
     bias = "long" if e9 >= e21 else "short"
 
-    # Stops from recent 15m range
-    recent_low = float(i_close.rolling(20, min_periods=5).min().iloc[-1])
-    recent_high = float(i_close.rolling(20, min_periods=5).max().iloc[-1])
-
-    entry = last
-    if bias == "long":
-        stop = min(recent_low, entry * 0.995)
-        risk_per_share = max(0.0, entry - stop)
-        target = entry + 2.0 * risk_per_share
-        rr = (target - entry) / (entry - stop) if (entry - stop) > 0 else 0.0
+    # --- ATR-based stop on 5m ---
+    m_high = m5["High"].astype(float).dropna()
+    m_low = m5["Low"].astype(float).dropna()
+    m_close_all = m5["Close"].astype(float).dropna()
+    if len(m_high) < 15 or len(m_low) < 15 or len(m_close_all) < 15:
+        # Fallback to simple small stop if ATR cannot be computed
+        atr = max(0.005 * last, 0.01)
     else:
-        stop = max(recent_high, entry * 1.005)
-        risk_per_share = max(0.0, stop - entry)
-        target = entry - 2.0 * risk_per_share
-        rr = (entry - target) / (stop - entry) if (stop - entry) > 0 else 0.0
+        prev_close = m_close_all.shift(1)
+        tr1 = (m_high - m_low).abs()
+        tr2 = (m_high - prev_close).abs()
+        tr3 = (m_low - prev_close).abs()
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr = float(tr.tail(14).mean())
+        if np.isnan(atr) or atr <= 0:
+            atr = max(0.005 * last, 0.01)
 
-    # Position sizing: risk 1% of capital
+    high_vol_tickers = {"TSLA", "NVDA", "META", "AMZN", "MSTR", "COIN", "AMD"}
+    atr_mult = 1.5 if ticker.upper() in high_vol_tickers else 1.0
+
+    # Entry refinement from latest 5m candle
+    last_high = float(m_high.iloc[-1])
+    last_low = float(m_low.iloc[-1])
+    if bias == "long":
+        entry = last_high * 1.0005  # confirm breakout
+    else:
+        entry = last_low * 0.9995  # confirm breakdown
+
+    # Target distance constraints by instrument/price
+    price_ref = entry
+    if ticker in ("GC=F", "CL=F"):
+        max_target_pct = 0.5  # 0.5%
+    else:
+        if price_ref < 200:
+            max_target_pct = 1.5  # 1.5%
+        else:
+            max_target_pct = 1.0  # 1.0%
+    max_target_dist = price_ref * (max_target_pct / 100.0)
+
+    # Stop distance from ATR, but ensure 2R target stays within max target distance
+    stop_dist_raw = atr_mult * atr
+    max_stop_dist = max_target_dist / 2.0 if max_target_dist > 0 else stop_dist_raw
+    stop_dist = min(stop_dist_raw, max_stop_dist) if max_stop_dist > 0 else stop_dist_raw
+
+    # Fallback if something went wrong
+    if stop_dist <= 0 or np.isnan(stop_dist):
+        stop_dist = max(0.005 * entry, 0.01)  # 0.5% of entry or 1 cent
+
+    if bias == "long":
+        stop = entry - stop_dist
+        target = entry + 2.0 * stop_dist
+    else:
+        stop = entry + stop_dist
+        target = entry - 2.0 * stop_dist
+
+    risk_per_share = abs(entry - stop)
+
+    # Final safeguard: ensure target distance still within max_target_dist
+    target_dist = abs(target - entry)
+    if max_target_dist > 0 and target_dist > max_target_dist:
+        # Shrink stop and target proportionally to keep 2:1
+        stop_dist = max_target_dist / 2.0
+        if bias == "long":
+            stop = entry - stop_dist
+            target = entry + 2.0 * stop_dist
+        else:
+            stop = entry + stop_dist
+            target = entry - 2.0 * stop_dist
+        risk_per_share = abs(entry - stop)
+
+    if risk_per_share <= 0 or np.isnan(risk_per_share):
+        # Fallback risk_per_share: 0.5% of entry
+        risk_per_share = max(0.005 * entry, 0.01)
+        if bias == "long":
+            stop = entry - risk_per_share
+            target = entry + 2.0 * risk_per_share
+        else:
+            stop = entry + risk_per_share
+            target = entry - 2.0 * risk_per_share
+
+    rr = (abs(target - entry) / risk_per_share) if risk_per_share > 0 else 0.0
+
+    # Position sizing: risk 1% of capital with robust fallback
     risk_budget = max(0.0, float(capital) * 0.01)
     shares = int(risk_budget / risk_per_share) if risk_per_share > 0 else 0
+    if (shares <= 0 or np.isnan(shares)) and capital > 500:
+        shares = 1
 
     vol = _volatility_pct(daily["Close"].astype(float))
     trend_conf = _trend_confidence(i_close)
