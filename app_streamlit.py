@@ -41,7 +41,7 @@ def _badge(action: str) -> str:
     elif a == "SELL SHORT":
         color = "#dc2626"
     else:
-        color = "#6b7280"
+        color = "#4b5563"
     return (
         f"<span style='background:{color};color:white;padding:0.2rem 0.65rem;"
         "border-radius:999px;font-weight:700;font-size:0.85rem;'>"
@@ -264,9 +264,13 @@ def render_chart_for_opportunity(o: dict) -> None:
     )
 
     fig.update_layout(
-        template="plotly_dark", height=500,
+        template="plotly_dark",
+        height=500,
         margin=dict(l=40, r=40, t=40, b=40),
         showlegend=False,
+        paper_bgcolor="#0a0a0a",
+        plot_bgcolor="#0a0a0a",
+        font=dict(color="#f1f5f9"),
     )
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(showgrid=True, gridcolor="#1f2937", row=1, col=1)

@@ -18,9 +18,11 @@ class Opportunity:
     confidence: str  # Low | Medium | High
     score: float
     risk: float
-    signal: float  # e.g. p_up or directional signal in [-1,1]
+    signal: float  # e.g. directional bias in [-1,1]
     explanation: str
     current_price: float
+    timeframes_confirmed: List[str]
+    frameworks: List[str]
 
 
 def _clip01(x: float) -> float:
@@ -164,9 +166,10 @@ def macro_context_headlines() -> Dict[str, object]:
 
 def score_intraday_signals(
     daily: "pd.DataFrame",
+    h1: "pd.DataFrame",
     m15: "pd.DataFrame",
     m5: "pd.DataFrame",
-) -> Tuple[int, Dict[str, float], str]:
+) -> Tuple[int, Dict[str, float], str, List[str], str]:
     """
     Compute a set of signals and return:
       - signal_count (how many align)
@@ -179,27 +182,39 @@ def score_intraday_signals(
 
     signals: Dict[str, float] = {}
 
-    # Trend: EMA9 vs EMA21 on 15m and daily
+    # Close series per timeframe
     d_close = daily["Close"].astype(float).dropna()
+    h_close = h1["Close"].astype(float).dropna()
     i_close = m15["Close"].astype(float).dropna()
     m_close = m5["Close"].astype(float).dropna()
-    if len(d_close) < 30 or len(i_close) < 50 or len(m_close) < 50:
-        return (0, {}, "Not enough recent data for a reliable intraday read.")
+    if len(d_close) < 60 or len(h_close) < 60 or len(i_close) < 60 or len(m_close) < 60:
+        return (0, {}, "Not enough recent data for a reliable multi-timeframe read.", [], "mixed")
 
+    # Trend: EMA9 vs EMA21 on all four timeframes
     d_trend = float((ema(d_close, 9).iloc[-1] / ema(d_close, 21).iloc[-1]) - 1.0)
+    h_trend = float((ema(h_close, 9).iloc[-1] / ema(h_close, 21).iloc[-1]) - 1.0)
     i_trend = float((ema(i_close, 9).iloc[-1] / ema(i_close, 21).iloc[-1]) - 1.0)
+    m_trend = float((ema(m_close, 9).iloc[-1] / ema(m_close, 21).iloc[-1]) - 1.0)
     signals["trend_daily"] = d_trend
+    signals["trend_1h"] = h_trend
     signals["trend_15m"] = i_trend
+    signals["trend_5m"] = m_trend
 
-    # Momentum: RSI + MACD hist on 15m
+    # Momentum: RSI + MACD hist on 1h and 15m
+    h_rsi = float(rsi(h_close, 14).iloc[-1])
     i_rsi = float(rsi(i_close, 14).iloc[-1])
+    h_macd_hist = float(macd(h_close).hist.iloc[-1])
     i_macd_hist = float(macd(i_close).hist.iloc[-1])
+    signals["rsi_1h"] = h_rsi
     signals["rsi_15m"] = i_rsi
+    signals["macd_hist_1h"] = h_macd_hist
     signals["macd_hist_15m"] = i_macd_hist
 
     # Volume confirmation: last 5m vol vs rolling mean
     vol = m5["Volume"].astype(float).dropna()
-    vol_ratio = float(vol.iloc[-1] / (vol.rolling(20, min_periods=20).mean().iloc[-1] or np.nan))
+    vol_ratio = float(
+        vol.iloc[-1] / (vol.rolling(20, min_periods=20).mean().iloc[-1] or 1.0)
+    )
     signals["volume_ratio_5m"] = vol_ratio
 
     # Breakout: last 15m close vs 20-bar range
@@ -216,24 +231,37 @@ def score_intraday_signals(
     signals["sr_score"] = float(pats.get("support_resistance", 0.0))
     signals["flag_score"] = float(pats.get("flags", 0.0))
 
-    # Determine direction preference
+    # Determine direction preference per timeframe
     bullish_votes = 0
     bearish_votes = 0
+    confirmed_timeframes: List[str] = []
 
-    # Trend votes
-    if d_trend > 0:
-        bullish_votes += 1
-    if d_trend < 0:
-        bearish_votes += 1
-    if i_trend > 0:
-        bullish_votes += 1
-    if i_trend < 0:
-        bearish_votes += 1
+    def vote(trend: float, label: str) -> None:
+        nonlocal bullish_votes, bearish_votes, confirmed_timeframes
+        if trend > 0:
+            bullish_votes += 1
+            confirmed_timeframes.append(label)
+        elif trend < 0:
+            bearish_votes += 1
+            confirmed_timeframes.append(label)
+
+    vote(d_trend, "1D")
+    vote(h_trend, "1H")
+    vote(i_trend, "15M")
+    vote(m_trend, "5M")
 
     # Momentum votes
+    if h_rsi >= 55:
+        bullish_votes += 1
+    if h_rsi <= 45:
+        bearish_votes += 1
     if i_rsi >= 55:
         bullish_votes += 1
     if i_rsi <= 45:
+        bearish_votes += 1
+    if h_macd_hist > 0:
+        bullish_votes += 1
+    if h_macd_hist < 0:
         bearish_votes += 1
     if i_macd_hist > 0:
         bullish_votes += 1
@@ -262,7 +290,11 @@ def score_intraday_signals(
 
     # Plain-English fragment
     parts = []
-    parts.append("Short-term trend and momentum are aligned." if direction != "mixed" else "Signals are mixed.")
+    parts.append(
+        "Multi-timeframe trend and momentum are aligned."
+        if direction != "mixed"
+        else "Signals are mixed across timeframes."
+    )
     if brk_up > 0:
         parts.append("Price is breaking above a recent intraday range with momentum.")
     if brk_dn > 0:
@@ -275,13 +307,14 @@ def score_intraday_signals(
         parts.append("Daily resistance is pressuring price.")
 
     expl = " ".join(parts[:3])
-    return (signal_count, signals, expl)
+    return (signal_count, signals, expl, confirmed_timeframes, direction)
 
 
 def make_trade_plan(
     ticker: str,
     *,
     daily: "pd.DataFrame",
+    h1: "pd.DataFrame",
     m15: "pd.DataFrame",
     m5: "pd.DataFrame",
     capital: float,
@@ -293,7 +326,9 @@ def make_trade_plan(
     import numpy as np
 
     allowed, window_hint = entry_window_hint()
-    sig_count, sigs, sig_expl = score_intraday_signals(daily, m15, m5)
+    sig_count, sigs, sig_expl, tfs_confirmed, direction = score_intraday_signals(
+        daily, h1, m15, m5
+    )
 
     # Directional bias from 15m trend
     from utils.technical_analysis import ema
@@ -329,9 +364,94 @@ def make_trade_plan(
     trend_conf = _trend_confidence(i_close)
     risk = _risk_bucket(vol)
 
-    # Only trade if >=3 signals align AND allowed time window AND RR>=2
+    # Strategy framework checks
+    frameworks: List[str] = []
+
+    from utils.technical_analysis import sma
+
+    # Mark Minervini style: near 52-week high, above 50/200 MA, tight base, volume surge
+    d_close = daily["Close"].astype(float).dropna()
+    d_vol = daily["Volume"].astype(float).dropna()
+    if len(d_close) >= 200 and len(d_vol) >= 40:
+        high_52w = float(d_close.tail(252).max())
+        last_close = float(d_close.iloc[-1])
+        sma50 = float(sma(d_close, 50).iloc[-1])
+        sma200 = float(sma(d_close, 200).iloc[-1])
+        base_range = float(d_close.tail(20).max() - d_close.tail(20).min())
+        base_mid = float((d_close.tail(20).max() + d_close.tail(20).min()) / 2.0)
+        base_tight = base_mid > 0 and base_range / base_mid <= 0.08
+        near_high = high_52w > 0 and last_close >= high_52w * 0.9
+        vol_surge = float(d_vol.iloc[-1]) > float(d_vol.tail(20).mean()) * 1.5
+        above_mas = last_close > sma50 and last_close > sma200
+        if near_high and base_tight and vol_surge and above_mas:
+            frameworks.append("Mark Minervini")
+
+    # Paul Tudor Jones: only trade with dominant daily trend
+    dom_trend_long = direction == "bullish"
+    dom_trend_short = direction == "bearish"
+    if (bias == "long" and dom_trend_long) or (bias == "short" and dom_trend_short):
+        frameworks.append("Paul Tudor Jones")
+
+    # VWAP mean reversion heuristic on 5m
+    m_close = m5["Close"].astype(float).dropna()
+    m_vol = m5["Volume"].astype(float).dropna()
+    if len(m_close) >= 20 and len(m_vol) >= 20:
+        cum_vol = m_vol.cumsum()
+        cum_pv = (m_close * m_vol).cumsum()
+        vwap = (cum_pv / cum_vol).iloc[-1]
+        last_price = float(m_close.iloc[-1])
+        if vwap > 0:
+            dist = abs(last_price - vwap) / vwap
+            if dist >= 0.015:
+                # if bias is to revert towards VWAP
+                if bias == "long" and last_price < vwap:
+                    frameworks.append("VWAP mean reversion")
+                if bias == "short" and last_price > vwap:
+                    frameworks.append("VWAP mean reversion")
+
+    # Opening range breakout on 15m
+    if len(m15) >= 4:
+        orange = m15.iloc[:2]
+        or_high = float(orange["High"].max())
+        or_low = float(orange["Low"].min())
+        last_close_15 = float(m15["Close"].iloc[-1])
+        vol15 = m15["Volume"].astype(float)
+        v_spike = float(vol15.iloc[-1]) > float(vol15.tail(20).mean()) * 1.5
+        broke_up = last_close_15 > or_high * 1.001
+        broke_dn = last_close_15 < or_low * 0.999
+        if v_spike and ((bias == "long" and broke_up) or (bias == "short" and broke_dn)):
+            frameworks.append("Opening range breakout")
+
+    # ICT-style liquidity sweep / FVG heuristic on 5m/15m
+    def _has_simple_sweep(df_ctx: "pd.DataFrame") -> bool:
+        c = df_ctx["Close"].astype(float).dropna()
+        h = df_ctx["High"].astype(float).dropna()
+        l = df_ctx["Low"].astype(float).dropna()
+        if len(c) < 5:
+            return False
+        # last bar wicks beyond recent high/low and closes back inside
+        recent_h = float(h.iloc[-5:-1].max())
+        recent_l = float(l.iloc[-5:-1].min())
+        last_h = float(h.iloc[-1])
+        last_l = float(l.iloc[-1])
+        last_c = float(c.iloc[-1])
+        swept_high = last_h > recent_h and last_c < recent_h
+        swept_low = last_l < recent_l and last_c > recent_l
+        return swept_high or swept_low
+
+    has_ict = _has_simple_sweep(m5) or _has_simple_sweep(m15)
+    if has_ict:
+        frameworks.append("ICT liquidity / FVG")
+
+    # Only trade if >=4 signals align AND at least 2 frameworks AND allowed time window AND RR>=2
     action = "AVOID"
-    if sig_count >= 3 and allowed and rr >= 2.0 and shares > 0:
+    if (
+        sig_count >= 4
+        and len(frameworks) >= 2
+        and allowed
+        and rr >= 2.0
+        and shares > 0
+    ):
         action = "BUY" if bias == "long" else "SELL SHORT"
 
     # Confidence
@@ -372,6 +492,8 @@ def make_trade_plan(
         signal=float(dir_signal),
         explanation=explanation.strip(),
         current_price=float(last),
+        timeframes_confirmed=list(dict.fromkeys(tfs_confirmed)),
+        frameworks=frameworks,
     )
 
 

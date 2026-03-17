@@ -258,16 +258,26 @@ def scan_intraday_opportunities(
     ranks.sort(key=lambda x: x[1], reverse=True)
     candidates = [t for t, _ in ranks[: max(20, int(prefilter_n))]]
 
-    # --- Intraday download for candidates
+    # --- Intraday download for candidates (1h, 15m, 5m)
+    h1_cfg = FetchConfig(interval="60m")
     m15_cfg = FetchConfig(interval="15m")
     m5_cfg = FetchConfig(interval="5m")
 
-    daily_ctx: Dict[str, pd.DataFrame] = {t: daily_frames[t] for t in candidates if t in daily_frames}
+    daily_ctx: Dict[str, pd.DataFrame] = {
+        t: daily_frames[t] for t in candidates if t in daily_frames
+    }
+    h1_frames: Dict[str, pd.DataFrame] = {}
     m15_frames: Dict[str, pd.DataFrame] = {}
     m5_frames: Dict[str, pd.DataFrame] = {}
 
     for i in range(0, len(candidates), 60):
         part = candidates[i : i + 60]
+        try:
+            h1 = fetch_ohlcv(part, period="10d", config=h1_cfg)
+            by1 = split_by_ticker(h1) if isinstance(h1.columns, pd.MultiIndex) else {part[0]: h1}
+            h1_frames.update(by1)
+        except Exception:
+            pass
         try:
             m15 = fetch_ohlcv(part, period="5d", config=m15_cfg)
             by15 = split_by_ticker(m15) if isinstance(m15.columns, pd.MultiIndex) else {part[0]: m15}
@@ -290,13 +300,19 @@ def scan_intraday_opportunities(
 
     opps = []
     for t in candidates:
-        if t not in daily_ctx or t not in m15_frames or t not in m5_frames:
+        if (
+            t not in daily_ctx
+            or t not in h1_frames
+            or t not in m15_frames
+            or t not in m5_frames
+        ):
             continue
         try:
             opps.append(
                 make_trade_plan(
                     t,
                     daily=daily_ctx[t],
+                    h1=h1_frames[t],
                     m15=m15_frames[t],
                     m5=m5_frames[t],
                     capital=float(capital),
