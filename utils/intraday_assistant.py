@@ -218,8 +218,8 @@ def score_intraday_signals(
     signals["volume_ratio_5m"] = vol_ratio
 
     # Breakout: last 15m close vs 20-bar range
-    upper = float(i_close.rolling(20, min_periods=20).max().iloc[-2])
-    lower = float(i_close.rolling(20, min_periods=20).min().iloc[-2])
+    upper = float(i_close.rolling(20, min_periods=5).max().iloc[-2])
+    lower = float(i_close.rolling(20, min_periods=5).min().iloc[-2])
     last = float(i_close.iloc[-1])
     brk_up = 1.0 if last > upper * 1.001 else 0.0
     brk_dn = 1.0 if last < lower * 0.999 else 0.0
@@ -341,8 +341,8 @@ def make_trade_plan(
     bias = "long" if e9 >= e21 else "short"
 
     # Stops from recent 15m range
-    recent_low = float(i_close.rolling(20, min_periods=20).min().iloc[-1])
-    recent_high = float(i_close.rolling(20, min_periods=20).max().iloc[-1])
+    recent_low = float(i_close.rolling(20, min_periods=5).min().iloc[-1])
+    recent_high = float(i_close.rolling(20, min_periods=5).max().iloc[-1])
 
     entry = last
     if bias == "long":
