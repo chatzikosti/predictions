@@ -212,9 +212,12 @@ def score_intraday_signals(
 
     # Volume confirmation: last 5m vol vs rolling mean
     vol = m5["Volume"].astype(float).dropna()
-    vol_ratio = float(
-        vol.iloc[-1] / (vol.rolling(20, min_periods=20).mean().iloc[-1] or 1.0)
-    )
+    vol_mean = vol.rolling(20, min_periods=5).mean().iloc[-1]
+    if vol_mean is None or np.isnan(vol_mean) or vol_mean <= 0:
+        vol_mean = 1.0
+    vol_ratio = float(vol.iloc[-1] / vol_mean)
+    if np.isnan(vol_ratio):
+        vol_ratio = 1.0
     signals["volume_ratio_5m"] = vol_ratio
 
     # Breakout: last 15m close vs 20-bar range
@@ -326,15 +329,67 @@ def make_trade_plan(
     import numpy as np
 
     allowed, window_hint = entry_window_hint()
+
+    # Stale signal protection outside regular US session (ET)
+    now_et = _now_et()
+    if now_et.tzinfo is not None:
+        tt = now_et.timetz()
+        market_open = time(9, 30, tzinfo=now_et.tzinfo) <= tt <= time(
+            16, 0, tzinfo=now_et.tzinfo
+        )
+    else:
+        nt = now_et.time()
+        market_open = time(9, 30) <= nt <= time(16, 0)
+    if not market_open:
+        window_hint = (
+            "Market closed. Next open: 9:30am ET. Pre-market signal only — "
+            "do not trade until market opens."
+        )
+
     sig_count, sigs, sig_expl, tfs_confirmed, direction = score_intraday_signals(
         daily, h1, m15, m5
     )
 
-    # Directional bias from 15m trend
-    from utils.technical_analysis import ema
+    m_close = m5["Close"].astype(float).dropna()
+    last = float(m_close.iloc[-1]) if len(m_close) else float("nan")
+
+    # Hard trend filter - daily and 1H must agree
+    d_trend_bull = sigs.get("trend_daily", 0) > 0
+    d_trend_bear = sigs.get("trend_daily", 0) < 0
+    h_trend_bull = sigs.get("trend_1h", 0) > 0
+    h_trend_bear = sigs.get("trend_1h", 0) < 0
+
+    if d_trend_bull and h_trend_bull:
+        allowed_bias = "long"
+    elif d_trend_bear and h_trend_bear:
+        allowed_bias = "short"
+    else:
+        allowed_bias = "none"
+
+    if allowed_bias == "none":
+        return Opportunity(
+            ticker=ticker,
+            action="AVOID",
+            entry=float("nan"),
+            target=float("nan"),
+            stop=float("nan"),
+            risk_reward=0.0,
+            position_size=0,
+            best_entry_window=str(window_hint),
+            confidence="Low",
+            score=0.0,
+            risk=0.0,
+            signal=0.0,
+            explanation="Avoid: daily and 1H trends conflict — no clear directional bias.",
+            current_price=float(last),
+            timeframes_confirmed=[],
+            frameworks=[],
+        )
+
+    # Force bias to match the hard trend filter
+    bias = "long" if allowed_bias == "long" else "short"
 
     i_close = m15["Close"].astype(float).dropna()
-    m_close = m5["Close"].astype(float).dropna()
     if len(i_close) < 20 or len(m_close) < 20:
         # Not enough intraday history for a precise intraday plan
         return Opportunity(
@@ -351,15 +406,10 @@ def make_trade_plan(
             risk=0.0,
             signal=0.0,
             explanation="Avoid for now: not enough intraday data for a tight intraday setup.",
-            current_price=float(m_close.iloc[-1]) if len(m_close) else float("nan"),
+            current_price=float(last),
             timeframes_confirmed=list(dict.fromkeys(tfs_confirmed)),
             frameworks=[],
         )
-
-    last = float(m_close.iloc[-1])
-    e9 = float(ema(i_close, 9).iloc[-1])
-    e21 = float(ema(i_close, 21).iloc[-1])
-    bias = "long" if e9 >= e21 else "short"
 
     # --- ATR-based stop on 5m ---
     m_high = m5["High"].astype(float).dropna()
@@ -532,10 +582,39 @@ def make_trade_plan(
     if has_ict:
         frameworks.append("ICT liquidity / FVG")
 
-    # Only trade if >=4 signals align AND at least 2 frameworks AND allowed time window AND RR>=2
+    # Paul Tudor Jones alone is not enough - require at least one technically specific framework
+    specific_frameworks = {
+        "Mark Minervini",
+        "VWAP mean reversion",
+        "Opening range breakout",
+        "ICT liquidity / FVG",
+    }
+    if not any(f in specific_frameworks for f in frameworks):
+        frameworks = []
+
+    # All 4 timeframes must agree on direction
+    timeframe_signals = [
+        sigs.get("trend_daily", 0),
+        sigs.get("trend_1h", 0),
+        sigs.get("trend_15m", 0),
+        sigs.get("trend_5m", 0),
+    ]
+    all_timeframes_agree = all(t > 0 for t in timeframe_signals) or all(
+        t < 0 for t in timeframe_signals
+    )
+
+    quality_frameworks = [
+        f
+        for f in frameworks
+        if f in ("Mark Minervini", "VWAP mean reversion", "Opening range breakout")
+    ]
+    has_quality_framework = len(quality_frameworks) >= 1
+
     action = "AVOID"
     if (
-        sig_count >= 4
+        all_timeframes_agree
+        and sig_count >= 5
+        and has_quality_framework
         and len(frameworks) >= 2
         and allowed
         and rr >= 2.0
