@@ -7,3 +7,4 @@ apscheduler
 transformers
 torch
 plotly
+streamlit-autorefresh

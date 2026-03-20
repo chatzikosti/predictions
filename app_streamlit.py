@@ -17,6 +17,8 @@ except ImportError:  # Python <3.9 fallback
     ZoneInfo = None  # type: ignore
 
 
+from streamlit_autorefresh import st_autorefresh
+st_autorefresh(interval=300000, key="autoscan")
 st.set_page_config(page_title="Intraday Trading Assistant", layout="wide")
 
 JOURNAL_PATH = "trade_journal.csv"
