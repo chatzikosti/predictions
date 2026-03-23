@@ -9,3 +9,5 @@ torch
 plotly
 streamlit-autorefresh
 protobuf==3.20.3
+altair==4.2.2
+streamlit==1.22.0
