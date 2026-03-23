@@ -10,4 +10,5 @@ plotly
 streamlit-autorefresh
 protobuf==3.20.3
 altair==4.2.2
-streamlit==1.22.0
+# imghdr was removed from Python 3.13+, so Streamlit versions before ~1.25 can crash on newer runtimes.
+streamlit==1.25.0
