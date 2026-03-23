@@ -613,22 +613,26 @@ def make_trade_plan(
         for f in frameworks
         if f in ("Mark Minervini", "VWAP mean reversion", "Opening range breakout")
     ]
-    has_quality_framework = len(quality_frameworks) >= 1
+    # Allow ICT to qualify for medium-grade intraday setups if higher-timeframe confluence is strong.
+    has_quality_framework = len(quality_frameworks) >= 1 or (
+        "ICT liquidity / FVG" in frameworks
+    )
 
     action = "AVOID"
-    if (
+    core_setup_ok = (
         confluence_ok
         and sig_count >= 4
         and has_quality_framework
         and len(frameworks) >= 1
-        and allowed
         and rr >= 2.0
         and shares > 0
-    ):
+    )
+    if core_setup_ok:
+        # During non-entry windows, still return directional pre-session setup (not forced AVOID).
         action = "BUY" if bias == "long" else "SELL SHORT"
 
     # Confidence tiers: high requires stronger confluence and >=2 frameworks
-    if action != "AVOID" and sig_count >= 5 and len(frameworks) >= 2:
+    if action != "AVOID" and sig_count >= 5 and len(frameworks) >= 2 and allowed:
         conf = "High"
     elif action != "AVOID":
         conf = "Medium"
@@ -653,7 +657,13 @@ def make_trade_plan(
         explanation = f"{why} {window_hint}"
     else:
         direction_phrase = "Upside" if action == "BUY" else "Downside"
-        explanation = f"{sig_expl} {direction_phrase} bias is supported today. {rr_txt}"
+        if allowed:
+            explanation = f"{sig_expl} {direction_phrase} bias is supported today. {rr_txt}"
+        else:
+            explanation = (
+                f"Pre-session setup: {sig_expl} {direction_phrase} bias is present, "
+                f"but entry timing is not currently in the preferred window. {window_hint}"
+            )
 
     return Opportunity(
         ticker=ticker,
