@@ -592,16 +592,21 @@ def make_trade_plan(
     if not any(f in specific_frameworks for f in frameworks):
         frameworks = []
 
-    # All 4 timeframes must agree on direction
+    # Confluence rule: higher timeframes must agree, and at least one lower timeframe confirms
     timeframe_signals = [
         sigs.get("trend_daily", 0),
         sigs.get("trend_1h", 0),
         sigs.get("trend_15m", 0),
         sigs.get("trend_5m", 0),
     ]
-    all_timeframes_agree = all(t > 0 for t in timeframe_signals) or all(
-        t < 0 for t in timeframe_signals
+    daily_h1_agree_bull = timeframe_signals[0] > 0 and timeframe_signals[1] > 0
+    daily_h1_agree_bear = timeframe_signals[0] < 0 and timeframe_signals[1] < 0
+    lower_tf_confirms = (
+        (timeframe_signals[2] > 0 or timeframe_signals[3] > 0)
+        if daily_h1_agree_bull
+        else (timeframe_signals[2] < 0 or timeframe_signals[3] < 0)
     )
+    confluence_ok = (daily_h1_agree_bull or daily_h1_agree_bear) and lower_tf_confirms
 
     quality_frameworks = [
         f
@@ -612,18 +617,23 @@ def make_trade_plan(
 
     action = "AVOID"
     if (
-        all_timeframes_agree
-        and sig_count >= 5
+        confluence_ok
+        and sig_count >= 4
         and has_quality_framework
-        and len(frameworks) >= 2
+        and len(frameworks) >= 1
         and allowed
         and rr >= 2.0
         and shares > 0
     ):
         action = "BUY" if bias == "long" else "SELL SHORT"
 
-    # Confidence
-    conf = _confidence_label(sig_count, trend_conf)
+    # Confidence tiers: high requires stronger confluence and >=2 frameworks
+    if action != "AVOID" and sig_count >= 5 and len(frameworks) >= 2:
+        conf = "High"
+    elif action != "AVOID":
+        conf = "Medium"
+    else:
+        conf = _confidence_label(sig_count, trend_conf)
 
     # A simple combined score for ranking
     dir_signal = 1.0 if action == "BUY" else (-1.0 if action == "SELL SHORT" else 0.0)
