@@ -1,0 +1,462 @@
+/* Split installation: photos (landscape + thumb grid) + text */
+
+:root {
+  --bg: #ffffff;
+  --fg: #000000;
+  --muted: #767676;
+  --rule: #000000;
+  --swatch: #a8b4c0;
+  --swatch-detail: #9aa8b5;
+  --max-intro: 32rem;
+  --text-col-max: min(26rem, 100%);
+  --photo-gap: 6px;
+  /* Same space above and below the dividing line; scales with viewport on large screens */
+  --between-works-gap: clamp(1.75rem, min(5vw, 7vh), 5.25rem);
+  --pad-x: clamp(1.25rem, 4vw, 2.5rem);
+  /* Text column inset — mirrors photo side rhythm */
+  --text-pad-x: clamp(1.2rem, 3vw, 1.9rem);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    "Helvetica Neue",
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-weight: 400;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  letter-spacing: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid currentColor;
+  padding-bottom: 0.08em;
+}
+
+a:hover {
+  opacity: 0.5;
+}
+
+.site-header {
+  padding: clamp(2.5rem, 6vw, 4rem) var(--pad-x) clamp(2rem, 5vw, 3.25rem);
+  text-align: center;
+  border-bottom: 1px solid var(--rule);
+}
+
+.eyebrow {
+  margin: 0 0 1rem;
+  font-size: 0.6875rem;
+  font-weight: 400;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--fg);
+}
+
+.name {
+  margin: 0 0 1.5rem;
+  font-size: clamp(1.875rem, 5.5vw, 3rem);
+  font-weight: 400;
+  letter-spacing: -0.03em;
+  line-height: 1.12;
+  text-transform: none;
+  font-variant-numeric: lining-nums;
+}
+
+.intro {
+  margin: 0 auto;
+  max-width: var(--max-intro);
+  font-size: 0.8125rem;
+  line-height: 1.65;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.works {
+  padding: clamp(1.65rem, 4.5vw, 2.65rem) 0 clamp(3rem, 8vw, 5rem);
+}
+
+.works-label {
+  margin: 0 0 clamp(1.35rem, 3.6vw, 2.35rem);
+  padding: 0 var(--pad-x);
+  font-size: 0.6875rem;
+  font-weight: 400;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--fg);
+}
+
+.artwork-installation {
+  position: relative;
+  z-index: 0;
+  background-color: var(--bg);
+}
+
+/* Grid lives here — overflow clips sticky photos so they cannot paint over padding/border below */
+.artwork-installation-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(16rem, 0.42fr);
+  grid-template-rows: auto;
+  align-items: start;
+  column-gap: clamp(1.25rem, 3vw, 2.25rem);
+  min-height: 0;
+  /* hidden: clips overlap everywhere. clip: same visual clip but keeps sticky working where supported */
+  overflow: hidden;
+}
+
+@supports (overflow: clip) {
+  .artwork-installation-grid {
+    overflow: clip;
+  }
+}
+
+/* Later sections stack above earlier ones so stickies never cover the rule or the next block */
+.works > article.artwork-installation:nth-of-type(1) {
+  z-index: 1;
+}
+
+.works > article.artwork-installation:nth-of-type(2) {
+  z-index: 2;
+}
+
+.works > article.artwork-installation:nth-of-type(3) {
+  z-index: 3;
+}
+
+.works > article.artwork-installation:nth-of-type(4) {
+  z-index: 4;
+}
+
+.works > article.artwork-installation:nth-of-type(5) {
+  z-index: 5;
+}
+
+.works > article.artwork-installation:nth-of-type(6) {
+  z-index: 6;
+}
+
+.works > article.artwork-installation:nth-of-type(7) {
+  z-index: 7;
+}
+
+.works > article.artwork-installation:nth-of-type(8) {
+  z-index: 8;
+}
+
+.artwork-installation:not(:last-of-type) {
+  padding-bottom: var(--between-works-gap);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* Gap below the line uses padding (not margin) so the next section’s background covers any sticky bleed */
+.works > article.artwork-installation ~ article.artwork-installation {
+  padding-top: var(--between-works-gap);
+}
+
+.artwork-visual {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  /* Only as tall as the photos — avoids a tall empty band under the strip */
+  height: fit-content;
+  max-height: 100vh;
+  padding: var(--photo-gap) var(--photo-gap) var(--photo-gap) var(--pad-x);
+  min-height: 0;
+}
+
+/* Landscape hero + thumb row; no flex-grow so nothing stretches below the thumbs */
+.piece-photos {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: var(--photo-gap);
+}
+
+.piece-hero {
+  flex: 0 0 auto;
+  width: 100%;
+  max-height: min(40vh, 360px);
+  min-height: 140px;
+  aspect-ratio: 16 / 9;
+}
+
+.piece-thumbs {
+  flex: 0 0 auto;
+  margin-top: clamp(1rem, 2.8vw, 1.85rem);
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--photo-gap);
+  align-content: start;
+  align-items: start;
+}
+
+.piece-hit {
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: #e8ecf0;
+  cursor: zoom-in;
+  overflow: hidden;
+  font: inherit;
+  color: inherit;
+}
+
+.piece-swatch--hero {
+  background: var(--swatch);
+}
+
+.piece-swatch--thumb {
+  background: var(--swatch-detail);
+}
+
+.piece-hit:focus {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+
+.piece-hit:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.piece-hit:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+
+.piece-hit img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.piece-hero .piece-hit {
+  height: 100%;
+  min-height: 0;
+}
+
+.piece-hero .piece-hit img {
+  object-fit: cover;
+}
+
+/* Landscape tiles: span twice as wide as tall (“longer” than the old squares) */
+.piece-thumbs .piece-hit {
+  aspect-ratio: 2 / 1;
+  min-height: 0;
+}
+
+.artwork-text {
+  max-width: var(--text-col-max);
+  padding: var(--photo-gap) var(--text-pad-x);
+}
+
+.artwork-title {
+  margin: 0 0 1.35rem;
+  font-size: clamp(1.0625rem, 1.5vw, 1.25rem);
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  text-transform: none;
+  text-align: left;
+  color: var(--fg);
+}
+
+.artwork-body {
+  font-size: 0.8125rem;
+  line-height: 1.65;
+  color: var(--fg);
+}
+
+.artwork-body p {
+  margin: 0 0 1rem;
+}
+
+.artwork-body p:last-child {
+  margin-bottom: 0;
+}
+
+.text-rule {
+  margin: 1.35rem 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.site-footer {
+  padding: 2rem var(--pad-x) 2.75rem;
+  text-align: center;
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: none;
+  color: var(--muted);
+  border-top: 1px solid var(--rule);
+}
+
+/* Full-size overlay */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(0.75rem, 3vw, 1.5rem);
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.2s ease, visibility 0.2s ease;
+}
+
+.lightbox.is-open {
+  visibility: visible;
+  opacity: 1;
+}
+
+.lightbox-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: rgba(255, 255, 255, 0.94);
+  cursor: pointer;
+}
+
+.lightbox-inner {
+  position: relative;
+  z-index: 1;
+  max-width: min(96vw, 1600px);
+  max-height: 92vh;
+  margin: 0;
+}
+
+.lightbox-img {
+  display: block;
+  max-width: min(96vw, 1600px);
+  max-height: 92vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.12);
+}
+
+.lightbox-img[hidden] {
+  display: none;
+}
+
+.lightbox-swatch {
+  margin: 0;
+  border: 0;
+  padding: 0;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.12);
+}
+
+.lightbox-swatch[hidden] {
+  display: none;
+}
+
+.lightbox-swatch--hero {
+  width: min(92vw, 1400px);
+  max-width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: min(78vh, 900px);
+  background: var(--swatch);
+}
+
+.lightbox-swatch--thumb {
+  width: min(92vw, 1200px);
+  max-width: 100%;
+  aspect-ratio: 2 / 1;
+  max-height: min(78vh, 560px);
+  background: var(--swatch-detail);
+}
+
+.lightbox-close {
+  position: absolute;
+  top: -2.5rem;
+  right: 0;
+  border: 0;
+  background: transparent;
+  font-size: 1.75rem;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--fg);
+  padding: 0.25rem 0.5rem;
+  font-family: inherit;
+}
+
+.lightbox-close:hover,
+.lightbox-close:focus-visible {
+  opacity: 0.55;
+}
+
+@media (max-width: 960px) {
+  .artwork-installation-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+    column-gap: 0;
+    min-height: 0;
+  }
+
+  .artwork-visual {
+    position: relative;
+    height: auto;
+    max-height: none;
+    min-height: 0;
+    padding: var(--photo-gap) var(--pad-x);
+  }
+
+  .piece-photos {
+    min-height: 0;
+  }
+
+  .piece-hero {
+    flex: 0 0 auto;
+    max-height: 42vh;
+    min-height: 180px;
+    aspect-ratio: 16 / 9;
+  }
+
+  .piece-thumbs {
+    margin-top: clamp(0.85rem, 2.2vw, 1.35rem);
+    grid-template-columns: repeat(
+      auto-fill,
+      minmax(min(100%, 5.5rem), 1fr)
+    );
+    grid-auto-rows: auto;
+  }
+
+  .piece-thumbs .piece-hit {
+    aspect-ratio: 2 / 1;
+  }
+
+  .artwork-text {
+    max-width: none;
+    padding: var(--photo-gap) var(--text-pad-x);
+  }
+
+  .lightbox-close {
+    top: -2rem;
+    right: -0.25rem;
+  }
+}

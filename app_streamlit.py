@@ -1,3 +1,4 @@
+import math
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -101,24 +102,48 @@ st.caption(
     "Scans the S&P 500 and key futures (Gold, Oil) each morning and highlights "
     "5–10 intraday trade ideas using trend, momentum, volume, and breakout/pattern context."
 )
+st.info(
+    "**Why signals can flip after a refresh:** they are built from the latest **closed** 5m/15m bars. "
+    "Live price on your broker often moves **before** the next bar closes. A name can show **SELL SHORT** "
+    "then bounce on the next tick — that is normal noise, not a bug. **Decide your stop (or bracket) "
+    "before or with entry**; do not enter first and add a stop after the market has moved.",
+    icon="⏱",
+)
 
 with st.expander("How to read this — click to open"):
     st.markdown(
         "- **BUY** — the analysis suggests the price is likely to go up. Consider opening a long position.\n"
         "- **SELL SHORT** — the analysis suggests the price is likely to go down. Consider opening a short position.\n"
-        "- **AVOID** — signals are mixed or weak. No clear opportunity today.\n"
-        "- **Entry price** — the price level at which to open your trade.\n"
+        "- **AVOID** — the scanner is **not** recommending a trade (rules not met). Any entry/stop/target "
+        "shown is for **context only** (hypothetical levels from the same risk math). **Position size is 0** "
+        "for AVOID so we don’t imply a real order.\n"
+        "- **Plan entry (at last)** — anchor price near the latest 5m close; use this for “where we are now.”\n"
+        "- **Breakout / breakdown trigger** — optional second level if price has not yet cleared the prior 5m bar "
+        "(watchlist / confirmation), not an automatic market order.\n"
         "- **Target price** — the price level at which to close and take your profit.\n"
         "- **Stop loss** — the price level at which to close and accept a small loss, to protect your capital.\n"
         "- **Risk/reward ratio** — how much you could gain vs how much you risk. 2:1 means you could gain $2 for every $1 risked. Always aim for 2:1 or better.\n"
-        "- **Position size** — how many shares/units to buy based on your capital and 1% risk rule.\n"
+        "- **Position size** — shares for **BUY / SELL SHORT only**, from 1% capital risk vs stop distance. "
+        "Not shown as a real size when action is AVOID.\n"
         "- **Confidence** — how many signals agree. High = 4+ signals aligned, Medium = 3, Low = fewer than 3.\n"
         "- **Entry window** — the best time of day to place the trade based on intraday patterns.\n"
         "- **EMA 9 / EMA 21** — short term moving averages that show trend direction.\n"
         "- **RSI** — momentum indicator. Above 70 = overbought, below 30 = oversold.\n"
         "- **MACD** — shows momentum shifts. A crossover is often a trade signal.\n"
-        "- **Volume confirmation** — a move on high volume is more reliable than one on low volume."
+        "- **Volume confirmation** — a move on high volume is more reliable than one on low volume.\n"
+        "- **15m / 5m trend** — direction needs several recent bars to agree (not just the latest candle), "
+        "so the bias changes less often than raw EMA crosses."
     )
+
+
+def _money(x) -> str:
+    try:
+        v = float(x)
+        if math.isfinite(v):
+            return f"${v:.2f}"
+    except (TypeError, ValueError):
+        pass
+    return "—"
 
 
 def _badge(action: str) -> str:
@@ -360,54 +385,94 @@ def render_chart_for_opportunity(o: dict) -> None:
     stop = float(o["stop"])
     rr = float(o["risk_reward"])
     size = int(o["position_size"])
+    trig = float(o.get("breakout_trigger", float("nan")))
 
     # Safely get high/low scalars
     high_max = _scalar(high_vals.max())
     low_min = _scalar(df["Low"].dropna().min())
 
-    for y_val, label_text, color, font_color in [
-        (entry, f"Entry ${entry:.2f}", "#22c55e", "#bbf7d0"),
-        (target, f"Target ${target:.2f}", "#3b82f6", "#bfdbfe"),
-        (stop, f"Stop ${stop:.2f}", "#f97373", "#fecaca"),
-    ]:
+    plan_ok = all(math.isfinite(x) for x in (entry, target, stop))
+
+    if plan_ok:
+        for y_val, label_text, color, font_color in [
+            (entry, f"Plan entry ${entry:.2f}", "#22c55e", "#bbf7d0"),
+            (target, f"Target ${target:.2f}", "#3b82f6", "#bfdbfe"),
+            (stop, f"Stop ${stop:.2f}", "#f97373", "#fecaca"),
+        ]:
+            fig.add_shape(
+                type="line", x0=x0, x1=x1, y0=y_val, y1=y_val,
+                xref="x", yref="y1",
+                line=dict(color=color, width=1.5, dash="dash"),
+            )
+            fig.add_annotation(
+                x=x1, y=y_val, xref="x", yref="y1",
+                text=label_text, showarrow=False,
+                font=dict(color=font_color, size=11),
+                xanchor="right",
+            )
+
+        if target > entry:
+            profit_y0, profit_y1 = entry, target
+            risk_y0, risk_y1 = stop, entry
+        else:
+            profit_y0, profit_y1 = target, entry
+            risk_y0, risk_y1 = entry, stop
+
         fig.add_shape(
-            type="line", x0=x0, x1=x1, y0=y_val, y1=y_val,
+            type="rect", x0=x0, x1=x1, y0=profit_y0, y1=profit_y1,
             xref="x", yref="y1",
-            line=dict(color=color, width=1.5, dash="dash"),
+            fillcolor="rgba(34,197,94,0.15)", line=dict(width=0), layer="below",
+        )
+        fig.add_shape(
+            type="rect", x0=x0, x1=x1, y0=risk_y0, y1=risk_y1,
+            xref="x", yref="y1",
+            fillcolor="rgba(239,68,68,0.18)", line=dict(width=0), layer="below",
+        )
+
+    if math.isfinite(trig):
+        fig.add_shape(
+            type="line",
+            x0=x0,
+            x1=x1,
+            y0=trig,
+            y1=trig,
+            xref="x",
+            yref="y1",
+            line=dict(color="#eab308", width=1.5, dash="dot"),
         )
         fig.add_annotation(
-            x=x1, y=y_val, xref="x", yref="y1",
-            text=label_text, showarrow=False,
-            font=dict(color=font_color, size=11),
+            x=x1,
+            y=trig,
+            xref="x",
+            yref="y1",
+            text=f"Trigger ${trig:.2f}",
+            showarrow=False,
+            font=dict(color="#fef08a", size=11),
             xanchor="right",
         )
 
-    if target > entry:
-        profit_y0, profit_y1 = entry, target
-        risk_y0, risk_y1 = stop, entry
+    if plan_ok:
+        info_text = (
+            f"Plan entry: ${entry:.2f}<br>"
+            f"Target: ${target:.2f}<br>"
+            f"Stop: ${stop:.2f}<br>"
+            f"R/R: {rr:.1f}:1<br>"
+            f"Size: {size} shares"
+        )
+        if o.get("action") == "AVOID":
+            info_text += "<br><i>Context only — not a recommended trade</i>"
+        if math.isfinite(trig):
+            info_text += f"<br>Trigger: ${trig:.2f}"
+        ys = [high_max, target, entry, stop]
+        if math.isfinite(trig):
+            ys.append(trig)
+        annotation_y = max(ys)
     else:
-        profit_y0, profit_y1 = target, entry
-        risk_y0, risk_y1 = entry, stop
+        info_text = "No plan overlay (missing levels)."
+        if math.isfinite(trig):
+            info_text += f"<br>Trigger: ${trig:.2f}"
+        annotation_y = max(high_max, trig) if math.isfinite(trig) else high_max
 
-    fig.add_shape(
-        type="rect", x0=x0, x1=x1, y0=profit_y0, y1=profit_y1,
-        xref="x", yref="y1",
-        fillcolor="rgba(34,197,94,0.15)", line=dict(width=0), layer="below",
-    )
-    fig.add_shape(
-        type="rect", x0=x0, x1=x1, y0=risk_y0, y1=risk_y1,
-        xref="x", yref="y1",
-        fillcolor="rgba(239,68,68,0.18)", line=dict(width=0), layer="below",
-    )
-
-    info_text = (
-        f"Entry: ${entry:.2f}<br>"
-        f"Target: ${target:.2f}<br>"
-        f"Stop: ${stop:.2f}<br>"
-        f"R/R: {rr:.1f}:1<br>"
-        f"Size: {size} shares"
-    )
-    annotation_y = max(high_max, target, entry, stop)
     fig.add_annotation(
         x=x0, y=annotation_y,
         xref="x", yref="y1",
@@ -518,13 +583,31 @@ if scan:
                             st.caption(_risk_english(float(o["risk"])))
                         with top_cols[2]:
                             st.markdown("**Plan**")
-                            st.metric("Entry", f"${o['entry']:.2f}")
-                            st.metric("Target", f"${o['target']:.2f}")
-                            st.metric("Stop", f"${o['stop']:.2f}")
+                            st.metric("Plan entry (at last)", _money(o["entry"]))
+                            bt = float(o.get("breakout_trigger", float("nan")))
+                            if math.isfinite(bt):
+                                if action == "SELL SHORT":
+                                    st.caption(
+                                        f"Breakdown trigger (if not short yet): **${bt:.2f}**"
+                                    )
+                                elif action == "BUY":
+                                    st.caption(
+                                        f"Breakout trigger (if not long yet): **${bt:.2f}**"
+                                    )
+                                else:
+                                    st.caption(f"Structure trigger (context): **${bt:.2f}**")
+                            st.metric("Target", _money(o["target"]))
+                            st.metric("Stop", _money(o["stop"]))
                         with top_cols[3]:
                             st.markdown("**Sizing**")
                             st.metric("R/R", f"{o['risk_reward']:.1f}:1")
-                            st.metric("Position size", f"{int(o['position_size'])} shares")
+                            if action == "AVOID":
+                                st.metric("Position size", "—")
+                                st.caption("No recommended trade — size not applied.")
+                            else:
+                                st.metric(
+                                    "Position size", f"{int(o['position_size'])} shares"
+                                )
                             st.markdown(
                                 f"<span style='color:{_confidence_color(conf)};font-weight:700;'>"
                                 f"{_conf_english(conf)}</span>",
