@@ -58,7 +58,7 @@ def entry_window_hint(now: Optional[datetime] = None) -> Tuple[bool, str]:
 
     open_t = time(9, 30, tzinfo=n.tzinfo)
     close_t = time(16, 0, tzinfo=n.tzinfo)
-    first_ok = time(9, 35, tzinfo=n.tzinfo)
+    first_ok = time(10, 0, tzinfo=n.tzinfo)
     last_ok = time(15, 45, tzinfo=n.tzinfo)
 
     if t < first_ok:
