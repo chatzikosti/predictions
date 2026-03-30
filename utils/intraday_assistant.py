@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timezone
 from typing import Dict, List, Optional, Tuple
@@ -22,8 +21,6 @@ class Opportunity:
     signal: float  # e.g. directional bias in [-1,1]
     explanation: str
     current_price: float
-    # If not NaN: breakout (long) / breakdown (short) level when plan entry is “at last”
-    breakout_trigger: float
     timeframes_confirmed: List[str]
     frameworks: List[str]
 
@@ -34,50 +31,6 @@ def _clip01(x: float) -> float:
     if x > 1.0:
         return 1.0
     return float(x)
-
-
-def _sign(x: float) -> int:
-    if x > 0.0:
-        return 1
-    if x < 0.0:
-        return -1
-    return 0
-
-
-def _stable_ema_trend(
-    close: "pd.Series",
-    *,
-    lookback: int,
-    need_agree: int,
-    deadband: float = 0.0,
-) -> float:
-    """
-    EMA9 vs EMA21 trend spread on the *last* bar, only if enough recent bars agree
-    on direction. Reduces whipsaw when a single new 5m/15m candle crosses the EMAs.
-    """
-    from utils.technical_analysis import ema
-
-    c = close.astype(float).dropna()
-    if len(c) < 21 + max(lookback, 2):
-        return 0.0
-    e9 = ema(c, 9)
-    e21 = ema(c, 21)
-    spread = ((e9 / e21) - 1.0).dropna()
-    if spread.empty:
-        return 0.0
-    last = float(spread.iloc[-1])
-    if deadband > 0.0 and abs(last) < deadband:
-        return 0.0
-    tail = spread.tail(lookback)
-    if len(tail) < need_agree:
-        return last
-    s_last = _sign(last)
-    if s_last == 0:
-        return 0.0
-    agree = sum(1 for v in tail if _sign(float(v)) == s_last)
-    if agree >= need_agree:
-        return last
-    return 0.0
 
 
 def _now_et() -> datetime:
@@ -237,16 +190,11 @@ def score_intraday_signals(
     if len(d_close) < 60 or len(h_close) < 60 or len(i_close) < 60 or len(m_close) < 60:
         return (0, {}, "Not enough recent data for a reliable multi-timeframe read.", [], "mixed")
 
-    # Trend: EMA9 vs EMA21. Daily / 1H use last bar; 15m / 5m need multi-bar agreement
-    # so one refresh or one new candle does not flip SELL SHORT ↔ BUY.
+    # Trend: EMA9 vs EMA21 on all four timeframes
     d_trend = float((ema(d_close, 9).iloc[-1] / ema(d_close, 21).iloc[-1]) - 1.0)
     h_trend = float((ema(h_close, 9).iloc[-1] / ema(h_close, 21).iloc[-1]) - 1.0)
-    i_trend = float(
-        _stable_ema_trend(i_close, lookback=3, need_agree=2, deadband=0.0)
-    )
-    m_trend = float(
-        _stable_ema_trend(m_close, lookback=4, need_agree=3, deadband=0.001)
-    )
+    i_trend = float((ema(i_close, 9).iloc[-1] / ema(i_close, 21).iloc[-1]) - 1.0)
+    m_trend = float((ema(m_close, 9).iloc[-1] / ema(m_close, 21).iloc[-1]) - 1.0)
     signals["trend_daily"] = d_trend
     signals["trend_1h"] = h_trend
     signals["trend_15m"] = i_trend
@@ -264,12 +212,9 @@ def score_intraday_signals(
 
     # Volume confirmation: last 5m vol vs rolling mean
     vol = m5["Volume"].astype(float).dropna()
-    vol_mean = vol.rolling(20, min_periods=5).mean().iloc[-1]
-    if vol_mean is None or np.isnan(vol_mean) or vol_mean <= 0:
-        vol_mean = 1.0
-    vol_ratio = float(vol.iloc[-1] / vol_mean)
-    if np.isnan(vol_ratio):
-        vol_ratio = 1.0
+    vol_ratio = float(
+        vol.iloc[-1] / (vol.rolling(20, min_periods=20).mean().iloc[-1] or 1.0)
+    )
     signals["volume_ratio_5m"] = vol_ratio
 
     # Breakout: last 15m close vs 20-bar range
@@ -381,68 +326,15 @@ def make_trade_plan(
     import numpy as np
 
     allowed, window_hint = entry_window_hint()
-
-    # Stale signal protection outside regular US session (ET)
-    now_et = _now_et()
-    if now_et.tzinfo is not None:
-        tt = now_et.timetz()
-        market_open = time(9, 30, tzinfo=now_et.tzinfo) <= tt <= time(
-            16, 0, tzinfo=now_et.tzinfo
-        )
-    else:
-        nt = now_et.time()
-        market_open = time(9, 30) <= nt <= time(16, 0)
-    if not market_open:
-        window_hint = (
-            "Market closed. Next open: 9:30am ET. Pre-market signal only — "
-            "do not trade until market opens."
-        )
-
     sig_count, sigs, sig_expl, tfs_confirmed, direction = score_intraday_signals(
         daily, h1, m15, m5
     )
 
-    m_close = m5["Close"].astype(float).dropna()
-    last = float(m_close.iloc[-1]) if len(m_close) else float("nan")
-
-    # Hard trend filter - daily and 1H must agree
-    d_trend_bull = sigs.get("trend_daily", 0) > 0
-    d_trend_bear = sigs.get("trend_daily", 0) < 0
-    h_trend_bull = sigs.get("trend_1h", 0) > 0
-    h_trend_bear = sigs.get("trend_1h", 0) < 0
-
-    if d_trend_bull and h_trend_bull:
-        allowed_bias = "long"
-    elif d_trend_bear and h_trend_bear:
-        allowed_bias = "short"
-    else:
-        allowed_bias = "none"
-
-    if allowed_bias == "none":
-        return Opportunity(
-            ticker=ticker,
-            action="AVOID",
-            entry=float("nan"),
-            target=float("nan"),
-            stop=float("nan"),
-            risk_reward=0.0,
-            position_size=0,
-            best_entry_window=str(window_hint),
-            confidence="Low",
-            score=0.0,
-            risk=0.0,
-            signal=0.0,
-            explanation="Avoid: daily and 1H trends conflict — no clear directional bias.",
-            current_price=float(last),
-            breakout_trigger=float("nan"),
-            timeframes_confirmed=[],
-            frameworks=[],
-        )
-
-    # Force bias to match the hard trend filter
-    bias = "long" if allowed_bias == "long" else "short"
+    # Directional bias from 15m trend
+    from utils.technical_analysis import ema
 
     i_close = m15["Close"].astype(float).dropna()
+    m_close = m5["Close"].astype(float).dropna()
     if len(i_close) < 20 or len(m_close) < 20:
         # Not enough intraday history for a precise intraday plan
         return Opportunity(
@@ -459,11 +351,15 @@ def make_trade_plan(
             risk=0.0,
             signal=0.0,
             explanation="Avoid for now: not enough intraday data for a tight intraday setup.",
-            current_price=float(last),
-            breakout_trigger=float("nan"),
+            current_price=float(m_close.iloc[-1]) if len(m_close) else float("nan"),
             timeframes_confirmed=list(dict.fromkeys(tfs_confirmed)),
             frameworks=[],
         )
+
+    last = float(m_close.iloc[-1])
+    e9 = float(ema(i_close, 9).iloc[-1])
+    e21 = float(ema(i_close, 21).iloc[-1])
+    bias = "long" if e9 >= e21 else "short"
 
     # --- ATR-based stop on 5m ---
     m_high = m5["High"].astype(float).dropna()
@@ -485,50 +381,13 @@ def make_trade_plan(
     high_vol_tickers = {"TSLA", "NVDA", "META", "AMZN", "MSTR", "COIN", "AMD"}
     atr_mult = 1.5 if ticker.upper() in high_vol_tickers else 1.0
 
-    # Entry: anchor to *current* price unless breakout is already in play.
-    # Old logic (always last_high * 1.0005) suggested fills far above market and felt "ahead of time".
+    # Entry refinement from latest 5m candle
     last_high = float(m_high.iloc[-1])
     last_low = float(m_low.iloc[-1])
-    risk_stem = atr_mult * atr
-    swing_low_5 = float(m_low.tail(5).min())
-    swing_high_5 = float(m_high.tail(5).max())
-
     if bias == "long":
-        breakout_level = last_high * 1.0003
-        # Already at/through the prior bar high → small buffer only; else trade *now* at last close.
-        if last >= last_high * 0.9998:
-            entry = max(last, min(breakout_level, last + 0.15 * risk_stem))
-        else:
-            entry = last
-        # Stop: tighter of ATR-based or recent swing (higher stop = smaller risk vs entry)
-        stop_from_atr = entry - risk_stem
-        stop_from_swing = swing_low_5 * 0.9999
-        stop = max(stop_from_atr, stop_from_swing)
-        if stop >= entry:
-            stop = entry - max(risk_stem, 0.002 * entry)
-        target = entry + 2.0 * (entry - stop)
+        entry = last_high * 1.0005  # confirm breakout
     else:
-        breakdown_level = last_low * 0.9997
-        if last <= last_low * 1.0002:
-            entry = min(last, max(breakdown_level, last - 0.15 * risk_stem))
-        else:
-            entry = last
-        stop_from_atr = entry + risk_stem
-        stop_from_swing = swing_high_5 * 1.0001
-        stop = min(stop_from_atr, stop_from_swing)
-        if stop <= entry:
-            stop = entry + max(risk_stem, 0.002 * entry)
-        target = entry - 2.0 * (stop - entry)
-
-    # Optional second line for UI: level to watch if we are not yet at breakout/breakdown.
-    if bias == "long":
-        trig = last_high * 1.0003
-        breakout_trigger = trig if last < last_high * 0.9998 and math.isfinite(trig) else float("nan")
-    else:
-        trig = last_low * 0.9997
-        breakout_trigger = trig if last > last_low * 1.0002 and math.isfinite(trig) else float("nan")
-
-    risk_per_share = abs(entry - stop)
+        entry = last_low * 0.9995  # confirm breakdown
 
     # Target distance constraints by instrument/price
     price_ref = entry
@@ -541,19 +400,39 @@ def make_trade_plan(
             max_target_pct = 1.0  # 1.0%
     max_target_dist = price_ref * (max_target_pct / 100.0)
 
-    # Shrink risk if target would exceed max % move (keep 2:1)
+    # Stop distance from ATR, but ensure 2R target stays within max target distance
+    stop_dist_raw = atr_mult * atr
+    max_stop_dist = max_target_dist / 2.0 if max_target_dist > 0 else stop_dist_raw
+    stop_dist = min(stop_dist_raw, max_stop_dist) if max_stop_dist > 0 else stop_dist_raw
+
+    # Fallback if something went wrong
+    if stop_dist <= 0 or np.isnan(stop_dist):
+        stop_dist = max(0.005 * entry, 0.01)  # 0.5% of entry or 1 cent
+
+    if bias == "long":
+        stop = entry - stop_dist
+        target = entry + 2.0 * stop_dist
+    else:
+        stop = entry + stop_dist
+        target = entry - 2.0 * stop_dist
+
+    risk_per_share = abs(entry - stop)
+
+    # Final safeguard: ensure target distance still within max_target_dist
     target_dist = abs(target - entry)
     if max_target_dist > 0 and target_dist > max_target_dist:
-        half = max_target_dist / 2.0
+        # Shrink stop and target proportionally to keep 2:1
+        stop_dist = max_target_dist / 2.0
         if bias == "long":
-            stop = entry - half
-            target = entry + max_target_dist
+            stop = entry - stop_dist
+            target = entry + 2.0 * stop_dist
         else:
-            stop = entry + half
-            target = entry - max_target_dist
+            stop = entry + stop_dist
+            target = entry - 2.0 * stop_dist
         risk_per_share = abs(entry - stop)
 
     if risk_per_share <= 0 or np.isnan(risk_per_share):
+        # Fallback risk_per_share: 0.5% of entry
         risk_per_share = max(0.005 * entry, 0.01)
         if bias == "long":
             stop = entry - risk_per_share
@@ -653,67 +532,19 @@ def make_trade_plan(
     if has_ict:
         frameworks.append("ICT liquidity / FVG")
 
-    # Paul Tudor Jones alone is not enough - require at least one technically specific framework
-    specific_frameworks = {
-        "Mark Minervini",
-        "VWAP mean reversion",
-        "Opening range breakout",
-        "ICT liquidity / FVG",
-    }
-    if not any(f in specific_frameworks for f in frameworks):
-        frameworks = []
-
-    # Confluence rule: higher timeframes must agree, and at least one lower timeframe confirms
-    timeframe_signals = [
-        sigs.get("trend_daily", 0),
-        sigs.get("trend_1h", 0),
-        sigs.get("trend_15m", 0),
-        sigs.get("trend_5m", 0),
-    ]
-    daily_h1_agree_bull = timeframe_signals[0] > 0 and timeframe_signals[1] > 0
-    daily_h1_agree_bear = timeframe_signals[0] < 0 and timeframe_signals[1] < 0
-    # Require both 15m and 5m to agree with higher-timeframe bias (big picture + minute picture).
-    if daily_h1_agree_bull:
-        lower_tf_confirms = timeframe_signals[2] > 0 and timeframe_signals[3] > 0
-    elif daily_h1_agree_bear:
-        lower_tf_confirms = timeframe_signals[2] < 0 and timeframe_signals[3] < 0
-    else:
-        lower_tf_confirms = False
-    confluence_ok = (daily_h1_agree_bull or daily_h1_agree_bear) and lower_tf_confirms
-
-    quality_frameworks = [
-        f
-        for f in frameworks
-        if f in ("Mark Minervini", "VWAP mean reversion", "Opening range breakout")
-    ]
-    # Allow ICT to qualify for medium-grade intraday setups if higher-timeframe confluence is strong.
-    has_quality_framework = len(quality_frameworks) >= 1 or (
-        "ICT liquidity / FVG" in frameworks
-    )
-
+    # Only trade if >=4 signals align AND at least 2 frameworks AND allowed time window AND RR>=2
     action = "AVOID"
-    core_setup_ok = (
-        confluence_ok
-        and sig_count >= 4
-        and has_quality_framework
-        and len(frameworks) >= 1
+    if (
+        sig_count >= 4
+        and len(frameworks) >= 2
+        and allowed
         and rr >= 2.0
         and shares > 0
-    )
-    if core_setup_ok:
-        # During non-entry windows, still return directional pre-session setup (not forced AVOID).
+    ):
         action = "BUY" if bias == "long" else "SELL SHORT"
 
-    # Hypothetical size from 1% rule; only meaningful when we actually recommend a trade.
-    position_size = 0 if action == "AVOID" else int(shares)
-
-    # Confidence tiers: high requires stronger confluence and >=2 frameworks
-    if action != "AVOID" and sig_count >= 5 and len(frameworks) >= 2 and allowed:
-        conf = "High"
-    elif action != "AVOID":
-        conf = "Medium"
-    else:
-        conf = _confidence_label(sig_count, trend_conf)
+    # Confidence
+    conf = _confidence_label(sig_count, trend_conf)
 
     # A simple combined score for ranking
     dir_signal = 1.0 if action == "BUY" else (-1.0 if action == "SELL SHORT" else 0.0)
@@ -733,13 +564,7 @@ def make_trade_plan(
         explanation = f"{why} {window_hint}"
     else:
         direction_phrase = "Upside" if action == "BUY" else "Downside"
-        if allowed:
-            explanation = f"{sig_expl} {direction_phrase} bias is supported today. {rr_txt}"
-        else:
-            explanation = (
-                f"Pre-session setup: {sig_expl} {direction_phrase} bias is present, "
-                f"but entry timing is not currently in the preferred window. {window_hint}"
-            )
+        explanation = f"{sig_expl} {direction_phrase} bias is supported today. {rr_txt}"
 
     return Opportunity(
         ticker=ticker,
@@ -748,7 +573,7 @@ def make_trade_plan(
         target=float(target),
         stop=float(stop),
         risk_reward=float(rr),
-        position_size=position_size,
+        position_size=int(shares),
         best_entry_window=str(window_hint),
         confidence=str(conf),
         score=float(score),
@@ -756,7 +581,6 @@ def make_trade_plan(
         signal=float(dir_signal),
         explanation=explanation.strip(),
         current_price=float(last),
-        breakout_trigger=float(breakout_trigger),
         timeframes_confirmed=list(dict.fromkeys(tfs_confirmed)),
         frameworks=frameworks,
     )
