@@ -538,12 +538,16 @@ if scan:
                 st.markdown("**Last updated (UTC)**")
                 st.write(last_updated or "—")
 
-            if not opps:
-                st.info("No opportunities found that meet today's alignment + risk/reward rules.")
+            trade_opps = [
+                o for o in opps if o.get("action") in ("BUY", "SELL SHORT")
+            ]
+
+            if not trade_opps:
+                st.info("No high-confidence trades right now. Next scan in 5 minutes.")
             else:
                 st.subheader("Ranked summary")
                 summary_rows = []
-                for o in opps:
+                for o in trade_opps:
                     summary_rows.append(
                         {
                             "Ticker": o["ticker"],
@@ -567,7 +571,7 @@ if scan:
                 )
 
                 st.subheader("Trade cards")
-                for o in opps:
+                for o in trade_opps:
                     t = o["ticker"]
                     action = o["action"]
                     conf = o.get("confidence", "Low")
